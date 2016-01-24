@@ -1,0 +1,95 @@
+<?php
+
+/**
+* Remote Administration Server Listener
+* Listens for connections from remote clients, necessary for initialization or updated settings triggered by a managed server. Only works in conjunction with ProcessAdminRemoteServer.
+* You can add custom actions by hooking into AdminRemoteServerListener::moreActions, checking $input->post->arcaction and modifying $origevent.
+* ToDo: Use more PW functionality for JSON handling.
+* ToDo: Validate client ip against value stored in the client configuration page.
+* ToDo: Avoid hooking into ProcessPageView::execute generically. Have ProcessAdminRemoteServer create an endpoint template
+*       that we can use with 'autoload' => 'template=endpointtemplate' and set up pages with names unique for every client.
+* Development stage: pre-alpha
+*
+* @author BitPoet
+*
+* https://github.com/bitpoet/ProcessAdminRemoteServer
+* Created 23 January 2016
+* 
+* ProcessWire 2.x
+* Copyright (C) 2011 by Ryan Cramer
+* Licensed under GNU/GPL v2, see LICENSE.TXT
+*
+* http://www.processwire.com
+*
+*/
+
+
+class AdminRemoteServerListener extends WireData implements Module {
+	public static function getModuleInfo() {
+		return array(
+			'title'			=>	__('Remote Administration Server Listener', __FILE__),
+			'summary'		=>	__('Sets up a listener for connections from the management client', __FILE__),
+			'version'		=>	'0.0.3',
+			'autoload'		=>	true,
+		);
+	}
+
+	public function __construct() {
+		$this->addHookBefore('ProcessPageView::execute', $this, 'processManagementConnection');
+	}
+	
+	public function processManagementConnection($event) {
+		// ToDo: Check client IP
+		$post = $this->input->post;
+		if( $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->arcaction || ! $post->srv ) {
+			return;
+		}
+		$this->log->message("Processing client request");
+		$client = $this->pages->get("ars_serversecret='{$post->srv}'");
+		if( $client instanceof NullPage ) {
+			header("Content-Type: application/json"); 
+			$event->return = json_encode(array("success" => false, "message" => "Illegal request"));
+			$event->replace = true;
+			return $event;
+		}
+		if( $post->arcaction == "initclient" ) {
+			if( $this->initClientAction($client) !== true ) return $event;
+		} else if( $post->arcaction == "ping" ) {
+			/* Everything okay, ping time is updated at the end of this method */
+		} else if( $this->moreActions($event, $client) == false ) {
+			header("Content-Type: application/json"); 
+			$event->return = json_encode(array("success" => false, "message" => "Unknown action"));
+			$event->replace = true;
+			return $event;
+		}
+		
+		$client->of(false);
+		$client->ars_lastping = strftime("%Y-%m-%d %H:%M:%S");
+		$client->save();
+		$client->of(true);
+		
+		header("Content-Type: application/json"); 
+		$event->return = json_encode(array("success" => true, "cli" => $client->ars_clientsecret));
+		$event->replace = true;
+	}
+	
+	public function ___initClientAction(&$origevent, &$client) {
+		$post = $this->input->post;
+		if( ! $post->cli ) {
+			$origevent->return = json_encode(array("success" => false, "message" => "Missing client identifier"));
+			$origevent->replace = true;
+			return $origevent;
+		}
+		$client->of(false);
+		$client->ars_clientsecret = $post->cli;
+		$client->ars_clienturl = $post->url;
+		$client->save();
+		$client->of(true);
+		return true;
+	}
+	
+	public function ___moreActions($origevent, $client) {
+		// Just to be extendable
+		return false;
+	}
+}

@@ -1,0 +1,636 @@
+<?php
+
+/**
+* Remote Administration Server module
+* Add basic remote management functionality for ProcessWire installations, works in combination with Admin Remote Client on the managed server.
+* ToDo: Create an endpoint template and set up uniquely-named endpoint pages for every connection.
+* Development stage: pre-alpha
+*
+* @author BitPoet
+*
+* https://github.com/bitpoet/ProcessAdminRemoteServer
+* Created 23 January 2016
+* 
+* ProcessWire 2.x
+* Copyright (C) 2011 by Ryan Cramer
+* Licensed under GNU/GPL v2, see LICENSE.TXT
+*
+* http://www.processwire.com
+*
+*/
+
+class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
+	
+	/**
+	 * Fields to check in install and remove in uninstall
+	 */
+	protected $installedFieldnames = array(
+		"ars_serversecret",
+		"ars_clientsecret",
+		"ars_clientname",
+		"ars_clienturl",
+		"ars_lastping",
+		"ars_lastresponse"
+	);
+	
+	public static function getModuleInfo() {
+		return array(
+			'title'			=>	__('Remote Administration Server', __FILE__),
+			'summary'		=>	__('Remotely administer another server that is running the Admin Remote Client module', __FILE__),
+			'version'		=>	'0.0.5',
+			'installs'		=>	array('AdminRemoteServerListener'),
+		);
+	}
+	
+	/**
+	 * Construct module
+	 */
+	public function __construct() {
+		$this->arsserverip = '';
+	}
+	
+	/**
+	 * Initialize module
+	 */
+	public function init() {
+		parent::init();
+	}
+
+	/**
+	 * Basic interface for process to lists and add clients
+	 *
+	 * @return string HTML
+	 */
+	public function ___execute() {
+		$post = $this->input->post;
+		
+		if( $post->arsaddclient && $post->arsnewurl && $post->arsnewname ) {
+			/* Create new secret and add page for client */
+			$p = new Page();
+			$p->template = $this->templates->get("adminremote-client");
+			$p->parent = $this->page;
+			$p->title = "ARSC " . $post->arsnewname;
+			$p->name = $this->sanitizer->pageName($post->arsnewname);
+			$p->ars_clientname = $post->arsnewname;
+			$p->ars_clienturl = $post->arsnewurl;
+			$p->ars_serversecret = uniqid($post->arsnewname, true);
+			$p->save();
+			
+			$this->session->message(sprintf($this->_("Admin Remote Server: Added server %s as client"), $p->ars_clientname));
+			$this->session->message($this->_("Client added. Please export the configuration and import it on the client in the Remote Admin settings."));
+		}
+		
+		$form = $this->modules->get("InputfieldForm");
+		$form->method = 'post';
+		$form->action = './';
+		
+		$wrap = new InputfieldMarkup();
+		$wrap->label = $this->_("Managed Servers (Clients) for") . " " . $this->arsserverip;
+		
+		$tbl = new MarkupAdminDataTable();
+		$tbl->setSortable(false); 
+		$tbl->setEncodeEntities(false);
+		
+		$tbl->headerRow($this->createClientHeaderRow());
+		
+		foreach($this->page->children as $child) {
+			$tbl->row($this->createClientInfoRow($child));
+		}
+		
+		$tbl->row($this->createEmptyClientRow());
+		
+		$tbl->row($this->newClientRow());
+		
+		$wrap->attr('value', $tbl->render());
+		
+		$btn = $this->modules->get('InputfieldButton');
+		$btn->attr('id+name', 'refresh');
+		$btn->value = $this->_("Refresh");
+		
+		$form->add($wrap);
+		$form->add($btn);
+		
+		$this->getMoreExecuteParts($form);
+		
+		return $form->render();
+	}
+	
+	public function ___createClientHeaderRow() {
+		return array(
+			$this->_("Name"),
+			$this->_("URL"),
+			$this->_("Last contact"),
+			$this->_("Actions")
+		);
+	}
+	
+	public function ___createClientInfoRow($client) {
+		return array(
+				"<a href='{$this->page->url}/edit?id={$client->id}'>$client->ars_clientname</a>",
+				$client->ars_clienturl,
+				$client->ars_lastping,
+				"<a href='./export?id={$client->id}'>" . $this->_("Export configuration") . "</a>"
+		);
+	}
+	
+	public function ___createEmptyClientRow() {
+		return array(
+			"&nbsp;",
+			"&nbsp;",
+			"&nbsp;",
+			"&nbsp;"
+		);
+	}
+	
+	/**
+	 * Hookable method before form rendering
+	 */
+	public function ___getMoreExecuteParts(&$form) {
+		/* Make modifications / additions to $form through a hook here */
+	}
+	
+	/**
+	 * Edit form for client configuration, shows details and allows to run actions for a client
+	 *
+	 * @return string HTML
+	 */
+	public function ___executeEdit() {
+		$get = $this->input->get;
+		$post = $this->input->post;
+		
+		if( ! $get->id ) {
+			$this->session->error($this->_("Missing client id"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		$p = $this->pages->get($get->id);
+		
+		if( $p instanceof NullPage ) {
+			$this->session->error($this->_("Invalid client id"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		if( $post->arsqueryclient ) {
+			$this->queryClient($p);
+		}
+		
+		$form = new InputfieldForm();
+		$form->method = 'post';
+		$form->action = "./edit?id={$get->id}";
+		
+		$mrk = new InputfieldMarkup();
+		$mrk->label = $this->_("Server") . " " . $p->title;
+		
+		$tbl = new MarkupAdminDataTable();
+		$tbl->setSortable(false); 
+		$tbl->setEncodeEntities(false);
+		$tbl->headerRow(array(
+			$this->_("Property"),
+			$this->_("Value")
+		));
+		
+		if( $p->ars_lastresponse ) {
+			$data = json_decode($p->ars_lastresponse, true);
+			if( is_array($data["base"]) ) {
+				foreach( $data["base"] as $k => $v ) {
+					$tbl->row(array($k, $v));
+				}
+			}
+		}
+
+		$tbl->row(array($this->_("Last contact"), $p->ars_lastping));		
+		$mrk->attr('value', $tbl->render());
+			
+		$form->append($mrk);
+		
+		if( array_key_exists("modules", $data) && is_array($data["modules"]) ) {
+			$form->append($this->outputModuleList($data));
+		}
+		
+		if( array_key_exists("config", $data) && is_array($data["config"]) ) {
+			$form->append($this->outputConfigList($data));
+		}
+
+		$btn = new InputfieldButton();
+		$btn->attr('name+id', "arsqueryclient");
+		$btn->attr('value', $this->_("Query client now"));
+		$form->append($btn);
+		
+		return $form->render();
+	}
+	
+	/**
+	 * Markup Inputfield for Modules list
+	 *
+	 * @return object InputfieldMarkup
+	 */
+	public function ___outputModuleList($inp) {
+		$mrk = new InputfieldMarkup();
+		$mrk->label = $this->_("Modules");
+		
+		$mrk->attr('value', $this->createModuleTable($inp)->render());
+		
+		return $mrk;
+	}
+	
+	/**
+	 * Data table for Modules list
+	 *
+	 * @return object MarkupAdminDataTable
+	 */
+	public function ___createModuleTable($inp) {
+		$tbl = new MarkupAdminDataTable();
+		$tbl->setSortable(false); 
+		$tbl->setEncodeEntities(false);
+		$tbl->headerRow($this->createModuleHeaderRow());
+		foreach( $inp["modules"] as $class => $info ) {
+			$tbl->row($this->createModuleInfoRow($class, $info));
+		}
+		return $tbl;
+	}
+	
+	/**
+	 * Header row for Modules list
+	 *
+	 * @return array
+	 */
+	public function ___createModuleHeaderRow() {
+		return array(
+			$this->_("Name"),
+			$this->_("Title"),
+			$this->_("Version"),
+			$this->_("Actions")
+		);
+	}
+	
+	/**
+	 * Entry row for Modules list
+	 *
+	 * @return array
+	 */
+	public function ___createModuleInfoRow($class, $info) {
+		return array(
+			$class,
+			$info["title"],
+			$info["version"],
+			$this->createModuleInfoActions($class, $info)
+		);
+	}
+	
+	/**
+	 * Actions for Modules list, append any custom actions through a hook here
+	 *
+	 * @return array
+	 */
+	public function ___createModuleInfoActions($class, $info) {
+		// Just to have this hookable
+		return "";
+	}
+	
+
+	/**
+	 * Markup Inputfield for config list
+	 *
+	 * @return object InputfieldMarkup
+	 */
+	public function ___outputConfigList($inp) {
+		$mrk = new InputfieldMarkup();
+		$mrk->label = $this->_("Config");
+		
+		$mrk->attr('value', $this->createConfigTable($inp)->render());
+		
+		return $mrk;
+	}
+	
+	/**
+	 * Data table for config list
+	 *
+	 * @return object MarkupAdminDataTable
+	 */
+	public function ___createConfigTable($inp) {
+		$tbl = new MarkupAdminDataTable();
+		$tbl->setSortable(false); 
+		$tbl->setEncodeEntities(false);
+		$tbl->headerRow($this->createConfigHeaderRow());
+		foreach( $inp["config"] as $name => $data ) {
+			if( ! is_array($data) && ! empty($data) ) {
+				$tbl->row($this->createConfigDataRow($name, $data));
+			}
+		}
+		return $tbl;
+	}
+
+	/**
+	 * Header row for config list
+	 *
+	 * @return array
+	 */
+	public function ___createConfigHeaderRow() {
+		return array(
+			$this->_("Setting"),
+			$this->_("Value")
+		);
+	}
+	
+	/**
+	 * Entry row for config list
+	 *
+	 * @return array
+	 */
+	public function ___createConfigDataRow($name, $data) {
+		return array(
+			$name,
+			is_array($data) ? implode("<br>", $data) : $data
+		);
+	}
+
+	
+	/**
+	 * Create the row for the execute view with the input fields for a new client
+	 *
+	 * @return array
+	 */
+	protected function newClientRow() {
+		$out = array();
+		
+		$fld = new InputfieldText();
+		$fld->attr('id+name', "arsnewname");
+		$fld->label = $this->_("Name for new client");
+		$fld->size = 40;
+		$out[] = $fld->render();
+		
+		$out[] = "&nbsp;";
+		
+		$out[] = "&nbsp;";
+		
+		$fld = new InputfieldButton();
+		$fld->attr('id+name', "arsaddclient");
+		$fld->attr('value', $this->_("Add new client"));
+		$out[] = $fld->render();
+		
+		return $out;
+	}
+	
+	/**
+	 * Create the configuration to import in the client
+	 *
+	 * @return string JSON
+	 */
+	public function ___executeExport() {
+		$get = $this->input->get;
+		
+		if( ! $get->id ) {
+			$this->session->error($this->_("No client id given, unable to display export script"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		$p = $this->pages->get($get->id);
+		if( $p instanceof NullPage ) {
+			$this->session->error($this->_("Invalid client id, unable to display export script"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		if( ! $this->arsserverip ) {
+			$this->session->error(sprintf($this->_("You have to set a server IP in the module configuration of %s first!"), $this->className()));
+			$this->session->redirect($this->config->urls->admin . "module/edit?name=" . $this->className());
+		}
+		
+		$cconfig = array(
+			"IP"		=>	$this->arsserverip,
+			"S_SECRET"	=>	$p->ars_serversecret,
+			"C_NAME"	=>	$p->ars_clientname,
+			"S_URL"		=>	$this->wire('pages')->get('/')->httpUrl
+		);
+		
+		$wrap = new InputfieldMarkup();
+		$wrap->label = $this->_("Client configuration");
+		$wrap->description = $this->_("Only needed once to configure the client. Import the JSON displayed here on the client and connect it to the server.");
+		$wrap->attr('value', "<pre>" . json_encode($cconfig) . "</pre>");
+		
+		return $wrap->render();
+	}
+	
+	/**
+	 * Connect to the client. Authenticates every request by sending the client's secret saved by the first connection from client to server. Checks the server secret supplied for the client.
+	 */
+	public function ___queryClient($client) {
+		$http = new WireHttp();
+		try {
+			$params = array(
+				"arsaction"		=>	"status",
+				"cli"			=>	$client->ars_clientsecret
+			);
+			$ct = $http->post($client->ars_clienturl . microtime() . "/", $params);
+			if( $ct === false ) {
+				$this->session->error(sprintf($this->_("HTTP Error: %s (%s)"), $http->getError(), $http->getHttpCode()));
+				$this->session->redirect($this->page->url . "edit?id={$this->input->get->id}");
+			}
+			$ret = json_decode($ct, true);
+		} catch( Expection $e ) {
+			$this->session->error(sprintf($this->_("Invalid response from managed client: %s"), $e->getMessage()));
+			$this->session->redirect($this->page->url);
+		}
+		if( ! is_array($ret) || ! array_key_exists("success", $ret) ) {
+			$this->session->error($this->_("Invalid or empty response from server"));
+			$this->session->redirect($this->page->url);
+		}
+		if( $ret["success"] != true ) {
+			$this->session->error(sprintf($this->_("Request returned error: %s"), $ret["message"]));
+			$this->session->redirect($this->page->url);
+		}
+		if( $ret["srv"] != $client->ars_serversecret ) {
+			$this->session->error($this->_("Client returned invalid server secret"));
+			$this->session->redirect($this->page->url);
+		}
+		$client->of(false);
+		$client->ars_lastresponse = json_encode($ret);
+		$client->save();
+		$client->of(true);
+		
+		$this->log->message($client->ars_lastresponse);
+		$this->session->message($this->_("Successfully contacted client"));
+		$this->session->redirect($this->page->url . "edit?id={$this->input->get->id}");
+	}
+
+	/**
+	 * Install required fields and pages
+	 *
+	 */
+	public function ___install() {
+		//if( $this->modules->get("ProcessAdminRemoteClient") )
+		//	throw new WireException($this->_("ProcessAdminRemoteClient already installed. Cannot run client and server module on the same server."));
+		
+		foreach( $this->installedFieldnames as $fldname ) {
+			if( $this->fields->get($fldname) ) throw new WireException($this->_("Field $fldname already exists! Unable to install."));
+		}
+		if( $this->fieldgroups->get("adminremote-client") )
+			throw new WireException($this->_("Fieldgroup adminremote-client already exists. Unable to install."));
+		
+		if( $this->templates->get("adminremote-client") )
+			throw new WireException($this->_("Template adminremote-client already exists. Unable to install."));
+		
+		foreach( array("arsremoteadmin", "arsmanageservers") as $pgname ) {
+			if( ! $this->pages->get("name=$pgname") instanceof NullPage ) throw new WireException($this->_("Admin page $pgname already exists, unable to install."));
+		}
+		
+		$fg = new Fieldgroup();
+		$fg->name = "adminremote-client";
+		$fg->add($this->fields->get('title'));
+		$fg->save();
+		
+		$t = new Template();
+		$t->name = "adminremote-client";
+		$t->fieldgroup = $fg;
+		$t->noChildren = 1;
+		$t->tags = "AdminRemoteServer";
+		$t->save();
+		
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeURL");
+		$f->name = "ars_clienturl";
+		$f->label = $this->_("Client URL");
+		$f->size = 1024;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+		
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = "ars_clientname";
+		$f->label = $this->_("Client name");
+		$f->size = 80;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+		
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = "ars_clientsecret";
+		$f->size = 100;
+		$f->label = $this->_("Client secret");
+		$f->collapsed = Inputfield::collapsedNoLocked;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = "ars_serversecret";
+		$f->size = 100;
+		$f->label = $this->_("Server secret");
+		$f->collapsed = Inputfield::collapsedNoLocked;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+		
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = "ars_lastping";
+		$f->size = 25;
+		$f->label = $this->_("Last ping");
+		$f->collapsed = Inputfield::collapsedNoLocked;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+		
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeTextarea");
+		$f->name = "ars_lastresponse";
+		$f->rows = 10;
+		$f->attr('cols', 100);
+		$f->label = $this->_("Last response");
+		$f->collapsed = Inputfield::collapsedNoLocked;
+		$f->tags = "AdminRemoteServer";
+		$f->save();
+		
+		$fg->add($f);
+		$fg->save();
+		
+		$admin = $this->pages->get('/admin/');
+		
+		$apage = new Page();
+		$apage->template = $this->templates->get('admin');
+		$apage->parent = $admin;
+		$apage->title = $this->_("Remote Admin");
+		$apage->name = "arsremoteadmin";
+		$apage->process = "ProcessList";
+		$apage->addStatus(Page::statusLocked);
+		$apage->save();
+		
+		$mpage = new Page();
+		$mpage->template = $this->templates->get('admin');
+		$mpage->parent = $apage;
+		$mpage->title = $this->_("Manage Clients");
+		$mpage->name = "arsmanageclients";
+		$mpage->process = "ProcessAdminRemoteServer";
+		$mpage->addStatus(Page::statusLocked);
+		$mpage->save();
+	}
+	
+	/**
+	 * Uninstall templates and fields
+	 *
+	 */
+	public function ___uninstall() {
+
+		$pgs = $this->pages->find("template=adminremote-client, include=all, check_access=0");
+		foreach( $pgs as $pg ) { $this->pages->delete($pg); }
+
+		$tpl = $this->templates->get("adminremote-client");
+		if( $tpl ) $this->templates->delete($tpl);
+		
+		$fg = $this->fieldgroups->get("adminremote-client");
+		if( $fg ) $this->fieldgroups->delete($fg);
+		
+		foreach( $this->installedFieldnames as $fldname ) {
+			$fld = $this->fields->get($fldname);
+			if( $fld ) $this->fields->delete($fld);
+		}
+		
+		$pg = $this->pages->get('name=arsmanageclients');
+		if( ! $pg instanceof NullPage ) {
+			$pg->removeStatus(Page::statusLocked);
+			$pg->save();
+			$this->pages->delete($pg);
+		}
+
+		$pg = $this->pages->get('name=arsremoteadmin');
+		if( ! $pg instanceof NullPage && $pg->numChildren == 0 ) {
+			$pg->removeStatus(Page::statusLocked);
+			$pg->save();
+			$this->pages->delete($pg);
+		}
+	}
+
+
+	/**
+	 * Build configuration form, store public IP in module configuration
+	 *
+	 * @return InputfieldWrapper
+	 */
+	public function getModuleConfigInputfields() {
+		$wrap = new InputfieldWrapper();
+		
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arsserverip");
+		$fld->size = 15;
+		$fld->label = $this->_("Public IP address of this server");
+		$fld->value = $this->arsserverip;
+		
+		$wrap->append($fld);
+		
+		return $wrap;
+	}
+
+}
+
