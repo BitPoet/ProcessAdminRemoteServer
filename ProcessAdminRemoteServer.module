@@ -37,7 +37,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		return array(
 			'title'			=>	__('Remote Administration Server', __FILE__),
 			'summary'		=>	__('Remotely administer another server that is running the Admin Remote Client module', __FILE__),
-			'version'		=>	'0.0.5',
+			'version'		=>	'0.0.6',
 			'installs'		=>	array('AdminRemoteServerListener'),
 		);
 	}
@@ -64,7 +64,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 	public function ___execute() {
 		$post = $this->input->post;
 		
-		if( $post->arsaddclient && $post->arsnewurl && $post->arsnewname ) {
+		if( $post->arsaddclient && $post->arsnewname ) {
 			/* Create new secret and add page for client */
 			$p = new Page();
 			$p->template = $this->templates->get("adminremote-client");
@@ -72,7 +72,6 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			$p->title = "ARSC " . $post->arsnewname;
 			$p->name = $this->sanitizer->pageName($post->arsnewname);
 			$p->ars_clientname = $post->arsnewname;
-			$p->ars_clienturl = $post->arsnewurl;
 			$p->ars_serversecret = uniqid($post->arsnewname, true);
 			$p->save();
 			
@@ -211,11 +210,18 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			$form->append($this->outputConfigList($data));
 		}
 
-		$btn = new InputfieldButton();
-		$btn->attr('name+id', "arsqueryclient");
-		$btn->attr('value', $this->_("Query client now"));
-		$form->append($btn);
-		
+		if( $p->arsclientsecret )
+		{
+			$btn = new InputfieldButton();
+			$btn->attr('name+id', "arsqueryclient");
+			$btn->attr('value', $this->_("Query client now"));
+			$form->append($btn);
+		} else {
+			$f = new InputfieldMarkup();
+			$f->attr('value', '<p>You need to configure the client and connect it to the server first!</p>');
+			$form->append($f);
+		}
+				
 		return $form->render();
 	}
 	
@@ -460,121 +466,163 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		//if( $this->modules->get("ProcessAdminRemoteClient") )
 		//	throw new WireException($this->_("ProcessAdminRemoteClient already installed. Cannot run client and server module on the same server."));
 		
-		foreach( $this->installedFieldnames as $fldname ) {
-			if( $this->fields->get($fldname) ) throw new WireException($this->_("Field $fldname already exists! Unable to install."));
-		}
-		if( $this->fieldgroups->get("adminremote-client") )
-			throw new WireException($this->_("Fieldgroup adminremote-client already exists. Unable to install."));
-		
-		if( $this->templates->get("adminremote-client") )
-			throw new WireException($this->_("Template adminremote-client already exists. Unable to install."));
-		
-		foreach( array("arsremoteadmin", "arsmanageservers") as $pgname ) {
-			if( ! $this->pages->get("name=$pgname") instanceof NullPage ) throw new WireException($this->_("Admin page $pgname already exists, unable to install."));
-		}
-		
-		$fg = new Fieldgroup();
-		$fg->name = "adminremote-client";
-		$fg->add($this->fields->get('title'));
-		$fg->save();
-		
-		$t = new Template();
-		$t->name = "adminremote-client";
-		$t->fieldgroup = $fg;
-		$t->noChildren = 1;
-		$t->tags = "AdminRemoteServer";
-		$t->save();
-		
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeURL");
-		$f->name = "ars_clienturl";
-		$f->label = $this->_("Client URL");
-		$f->size = 1024;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
-		
-		$fg->add($f);
-		$fg->save();
-		
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeText");
-		$f->name = "ars_clientname";
-		$f->label = $this->_("Client name");
-		$f->size = 80;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
-		
-		$fg->add($f);
-		$fg->save();
-		
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeText");
-		$f->name = "ars_clientsecret";
-		$f->size = 100;
-		$f->label = $this->_("Client secret");
-		$f->collapsed = Inputfield::collapsedNoLocked;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
-		
-		$fg->add($f);
-		$fg->save();
+		//foreach( $this->installedFieldnames as $fldname ) {
+		//	if( $this->fields->get($fldname) ) throw new WireException($this->_("Field $fldname already exists! Unable to install."));
+		//}
 
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeText");
-		$f->name = "ars_serversecret";
-		$f->size = 100;
-		$f->label = $this->_("Server secret");
-		$f->collapsed = Inputfield::collapsedNoLocked;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
+		//if( $this->fieldgroups->get("adminremote-client") )
+		//	throw new WireException($this->_("Fieldgroup adminremote-client already exists. Unable to install."));
 		
-		$fg->add($f);
-		$fg->save();
+		//if( $this->templates->get("adminremote-client") )
+		//	throw new WireException($this->_("Template adminremote-client already exists. Unable to install."));
 		
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeText");
-		$f->name = "ars_lastping";
-		$f->size = 25;
-		$f->label = $this->_("Last ping");
-		$f->collapsed = Inputfield::collapsedNoLocked;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
+		//foreach( array("arsremoteadmin", "arsmanageservers") as $pgname ) {
+		//	if( ! $this->pages->get("name=$pgname") instanceof NullPage ) throw new WireException($this->_("Admin page $pgname already exists, unable to install."));
+		//}
 		
-		$fg->add($f);
-		$fg->save();
+		$fg = $this->fieldgroups->get("adminremote-client");
+		if( ! $fg ) {
+			$fg = new Fieldgroup();
+			$fg->name = "adminremote-client";
+			$fg->add($this->fields->get('title'));
+			$fg->save();
+		}
 		
-		$f = new Field();
-		$f->type = $this->modules->get("FieldtypeTextarea");
-		$f->name = "ars_lastresponse";
-		$f->rows = 10;
-		$f->attr('cols', 100);
-		$f->label = $this->_("Last response");
-		$f->collapsed = Inputfield::collapsedNoLocked;
-		$f->tags = "AdminRemoteServer";
-		$f->save();
+		$t = $this->templates->get('adminremote-client');
+		if( ! $t ) {	
+			$t = new Template();
+			$t->name = "adminremote-client";
+			$t->fieldgroup = $fg;
+			$t->noChildren = 1;
+			$t->tags = "AdminRemoteServer";
+			$t->save();
+		}
 		
-		$fg->add($f);
-		$fg->save();
+		$f = $this->fields->get('ars_clienturl');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeURL");
+			$f->name = "ars_clienturl";
+			$f->label = $this->_("Client URL");
+			$f->size = 1024;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+		
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
+		
+		$f = $this->fields->get('ars_clientname');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeText");
+			$f->name = "ars_clientname";
+			$f->label = $this->_("Client name");
+			$f->size = 80;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+		
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
+				
+		$f = $this->fields->get('ars_clientsecret');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeText");
+			$f->name = "ars_clientsecret";
+			$f->size = 100;
+			$f->label = $this->_("Client secret");
+			$f->collapsed = Inputfield::collapsedNoLocked;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+		
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
+		
+		$f = $this->fields->get('ars_serversecret');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeText");
+			$f->name = "ars_serversecret";
+			$f->size = 100;
+			$f->label = $this->_("Server secret");
+			$f->collapsed = Inputfield::collapsedNoLocked;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+				
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
+				
+		$f = $this->fields->get('ars_lastping');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeText");
+			$f->name = "ars_lastping";
+			$f->size = 25;
+			$f->label = $this->_("Last ping");
+			$f->collapsed = Inputfield::collapsedNoLocked;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+				
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
+		
+		$f = $this->fields->get('ars_lastresponse');
+		if( ! $f ) {		
+			$f = new Field();
+			$f->type = $this->modules->get("FieldtypeTextarea");
+			$f->name = "ars_lastresponse";
+			$f->rows = 10;
+			$f->label = $this->_("Last response");
+			$f->collapsed = Inputfield::collapsedNoLocked;
+			$f->tags = "AdminRemoteServer";
+			$f->save();
+		}
+				
+		if( ! $fg->hasField($f->name) ) {			
+			$fg->add($f);
+			$fg->save();
+		}
 		
 		$admin = $this->pages->get('/admin/');
 		
-		$apage = new Page();
-		$apage->template = $this->templates->get('admin');
-		$apage->parent = $admin;
-		$apage->title = $this->_("Remote Admin");
-		$apage->name = "arsremoteadmin";
-		$apage->process = "ProcessList";
-		$apage->addStatus(Page::statusLocked);
-		$apage->save();
-		
-		$mpage = new Page();
-		$mpage->template = $this->templates->get('admin');
-		$mpage->parent = $apage;
-		$mpage->title = $this->_("Manage Clients");
-		$mpage->name = "arsmanageclients";
-		$mpage->process = "ProcessAdminRemoteServer";
-		$mpage->addStatus(Page::statusLocked);
-		$mpage->save();
+		$apage = $this->pages->get('name=arsremoteadmin');
+		if( $apage instanceof NullPage ) {
+			$apage = new Page();
+			$apage->template = $this->templates->get('admin');
+			$apage->parent = $admin;
+			$apage->title = $this->_("Remote Admin");
+			$apage->name = "arsremoteadmin";
+			$apage->process = "ProcessList";
+			$apage->addStatus(Page::statusLocked);
+			$apage->save();
+		}
+				
+		$mpage = $this->pages->get('name=arsmanageclients');
+		if( $mpage instanceof NullPage ) {
+			$mpage = new Page();
+			$mpage->template = $this->templates->get('admin');
+			$mpage->parent = $apage;
+			$mpage->title = $this->_("Manage Clients");
+			$mpage->name = "arsmanageclients";
+			$mpage->process = "ProcessAdminRemoteServer";
+			$mpage->addStatus(Page::statusLocked);
+			$mpage->save();
+		}
 	}
 	
 	/**
