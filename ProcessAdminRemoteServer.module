@@ -37,7 +37,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		return array(
 			'title'			=>	__('Remote Administration Server', __FILE__),
 			'summary'		=>	__('Remotely administer another server that is running the Admin Remote Client module', __FILE__),
-			'version'		=>	'0.0.6',
+			'version'		=>	'0.0.7',
 			'installs'		=>	array('AdminRemoteServerListener'),
 		);
 	}
@@ -54,6 +54,10 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 	 */
 	public function init() {
 		parent::init();
+		
+		$this->config->js("ars", array(
+			"exportmsg"		=>	$this->_("Exporting config will reset the client secret. You need to import+connect the client again. Proceed?")
+		));
 	}
 
 	/**
@@ -124,12 +128,40 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 	}
 	
 	public function ___createClientInfoRow($client) {
+		$class = empty($client->ars_clientsecret) ? "" : "arsconfirmexport";
+		$action = array("<a class='$class' href='./export?id={$client->id}' title='" . $this->_("Export configuration") . "'><i class='fa fa-cloud-download'> </i> </a>");
+		foreach($this->getActions($client) as $actionrow) {
+			$action[] = "<a class='{$actionrow[3]}' href='./action?action={$actionrow[0]}&id={$client->id}' title='{$actionrow[1]}'><i class='fa fa-{$actionrow[2]}'> </i> </a>";
+		}
 		return array(
-				"<a href='{$this->page->url}/edit?id={$client->id}'>$client->ars_clientname</a>",
-				$client->ars_clienturl,
-				$client->ars_lastping,
-				"<a href='./export?id={$client->id}'>" . $this->_("Export configuration") . "</a>"
+			"<a href='{$this->page->url}edit?id={$client->id}'>$client->ars_clientname</a>",
+			$client->ars_clienturl,
+			$client->ars_lastping,
+			implode(' ', $action)
 		);
+	}
+	
+	public function getActions($client) {
+		$actions = array();
+		return $this->moreActions($actions, $client);
+	}
+	
+	/**
+	 * Hook here to add more actions for clients.
+	 *
+	 * The first argument is a list of actions. Each action is an array
+	 * with the following four values:
+	 * - A unique identifier for the action
+	 * - The title for the action
+	 * - The font awesome class name (without leading fa-)
+	 * - The (optional) css class/classes for the action link
+	 */
+	public function ___moreActions($actions, $client) {
+		/*
+		 * Example:
+		 * $actions[] = array("status", $this->_("Verbose client status"), "question-circle", "arsstatus")
+		 */
+		return $actions;
 	}
 	
 	public function ___createEmptyClientRow() {
@@ -144,7 +176,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 	/**
 	 * Hookable method before form rendering
 	 */
-	public function ___getMoreExecuteParts(&$form) {
+	public function ___getMoreExecuteParts($form) {
 		/* Make modifications / additions to $form through a hook here */
 	}
 	
@@ -195,6 +227,8 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 					$tbl->row(array($k, $v));
 				}
 			}
+		} else {
+			$data = array();
 		}
 
 		$tbl->row(array($this->_("Last contact"), $p->ars_lastping));		
@@ -202,15 +236,19 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			
 		$form->append($mrk);
 		
-		if( array_key_exists("modules", $data) && is_array($data["modules"]) ) {
-			$form->append($this->outputModuleList($data));
+		if( array_key_exists("sitemodules", $data) && is_array($data["sitemodules"]) ) {
+			$form->append($this->outputModuleList($this->_("Site Modules"), $data["sitemodules"]));
 		}
 		
+		if( array_key_exists("coremodules", $data) && is_array($data["coremodules"]) ) {
+			$form->append($this->outputModuleList($this->_("Core Modules"), $data["coremodules"], true));
+		}
+
 		if( array_key_exists("config", $data) && is_array($data["config"]) ) {
 			$form->append($this->outputConfigList($data));
 		}
 
-		if( $p->arsclientsecret )
+		if( $p->ars_clientsecret )
 		{
 			$btn = new InputfieldButton();
 			$btn->attr('name+id', "arsqueryclient");
@@ -225,14 +263,49 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		return $form->render();
 	}
 	
+	
+	public function executeAction() {
+		$get = $this->input->get;
+		$post = $this->input->post;
+		
+		if( ! $get->action ) {
+			$this->session->error($this->_("Missing action"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		if( ! $get->id ) {
+			$this->session->error($this->_("Missing client id"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		$p = $this->pages->get($get->id);
+		
+		if( $p instanceof NullPage ) {
+			$this->session->error($this->_("Invalid client id"));
+			$this->session->redirect($this->page->url);
+		}
+		
+		if(! $this->processAction($get->action)) {
+			$this->session->error($this->_("Unknown action") . ": " . $get->action);
+			$this->session->redirect($this->page->url);
+		}
+	}
+	
+	public function ___processAction($action) {
+		return false;
+	}
+	
 	/**
 	 * Markup Inputfield for Modules list
 	 *
 	 * @return object InputfieldMarkup
 	 */
-	public function ___outputModuleList($inp) {
+	public function ___outputModuleList($title, $inp, $collapsed = false) {
 		$mrk = new InputfieldMarkup();
-		$mrk->label = $this->_("Modules");
+		$mrk->label = $title;
+		if($collapsed) {
+			$mrk->collapsed = Inputfield::collapsedYes;
+		}
 		
 		$mrk->attr('value', $this->createModuleTable($inp)->render());
 		
@@ -249,7 +322,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		$tbl->setSortable(false); 
 		$tbl->setEncodeEntities(false);
 		$tbl->headerRow($this->createModuleHeaderRow());
-		foreach( $inp["modules"] as $class => $info ) {
+		foreach( $inp as $class => $info ) {
 			$tbl->row($this->createModuleInfoRow($class, $info));
 		}
 		return $tbl;
@@ -265,6 +338,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			$this->_("Name"),
 			$this->_("Title"),
 			$this->_("Version"),
+			$this->_("Installed"),
 			$this->_("Actions")
 		);
 	}
@@ -279,6 +353,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			$class,
 			$info["title"],
 			$info["version"],
+			(isset($info["installed"]) && $info["installed"]) ? "<i class='fa fa-check'> </i>" : "",
 			$this->createModuleInfoActions($class, $info)
 		);
 	}
@@ -346,7 +421,7 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 	public function ___createConfigDataRow($name, $data) {
 		return array(
 			$name,
-			is_array($data) ? implode("<br>", $data) : $data
+			is_array($data) ? "<pre>" . json_encode($data, JSON_PRETTY_PRINT) . "</pre>" : $data
 		);
 	}
 
@@ -405,13 +480,17 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			"IP"		=>	$this->arsserverip,
 			"S_SECRET"	=>	$p->ars_serversecret,
 			"C_NAME"	=>	$p->ars_clientname,
+			"C_SECRET"	=>	"",
 			"S_URL"		=>	$this->wire('pages')->get('/')->httpUrl
 		);
+		
+		$p->ars_clientsecret = "";
+		$p->save();
 		
 		$wrap = new InputfieldMarkup();
 		$wrap->label = $this->_("Client configuration");
 		$wrap->description = $this->_("Only needed once to configure the client. Import the JSON displayed here on the client and connect it to the server.");
-		$wrap->attr('value', "<pre>" . json_encode($cconfig) . "</pre>");
+		$wrap->attr('value', "<textarea>" . json_encode($cconfig) . "</textarea>");
 		
 		return $wrap->render();
 	}
@@ -426,7 +505,8 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 				"arsaction"		=>	"status",
 				"cli"			=>	$client->ars_clientsecret
 			);
-			$ct = $http->post($client->ars_clienturl . microtime() . "/", $params);
+			$url = $client->ars_clienturl . "?v=" . str_replace(array('.', ' '), '', microtime());
+			$ct = $http->post($url, $params);
 			if( $ct === false ) {
 				$this->session->error(sprintf($this->_("HTTP Error: %s (%s)"), $http->getError(), $http->getHttpCode()));
 				$this->session->redirect($this->page->url . "edit?id={$this->input->get->id}");
@@ -437,11 +517,11 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 			$this->session->redirect($this->page->url);
 		}
 		if( ! is_array($ret) || ! array_key_exists("success", $ret) ) {
-			$this->session->error($this->_("Invalid or empty response from server"));
+			$this->session->error(sprintf($this->_("Invalid or empty response from server: %s"), $ret));
 			$this->session->redirect($this->page->url);
 		}
 		if( $ret["success"] != true ) {
-			$this->session->error(sprintf($this->_("Request returned error: %s"), $ret["message"]));
+			$this->session->error(sprintf($this->_("Request returned error: %s"), isset($ret["message"]) ? $ret["message"] : "Unknown"));
 			$this->session->redirect($this->page->url);
 		}
 		if( $ret["srv"] != $client->ars_serversecret ) {
@@ -453,7 +533,6 @@ class ProcessAdminRemoteServer extends Process implements ConfigurableModule {
 		$client->save();
 		$client->of(true);
 		
-		$this->log->message($client->ars_lastresponse);
 		$this->session->message($this->_("Successfully contacted client"));
 		$this->session->redirect($this->page->url . "edit?id={$this->input->get->id}");
 	}

@@ -29,7 +29,7 @@ class AdminRemoteServerListener extends WireData implements Module {
 		return array(
 			'title'			=>	__('Remote Administration Server Listener', __FILE__),
 			'summary'		=>	__('Sets up a listener for connections from the management client', __FILE__),
-			'version'		=>	'0.0.3',
+			'version'		=>	'0.0.7',
 			'autoload'		=>	true,
 		);
 	}
@@ -41,26 +41,34 @@ class AdminRemoteServerListener extends WireData implements Module {
 	public function processManagementConnection($event) {
 		// ToDo: Check client IP
 		$post = $this->input->post;
-		if( $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->arcaction || ! $post->srv ) {
+		if( PHP_SAPI == "cli" || $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->arcaction || ! $post->cname || ! $post->srv ) {
 			return;
 		}
-		$this->log->message("Processing client request");
+		
 		$client = $this->pages->get("ars_serversecret='{$post->srv}'");
-		if( $client instanceof NullPage ) {
+		if( $client instanceof NullPage || $client->ars_clientname != $post->cname ) {
 			header("Content-Type: application/json"); 
-			$event->return = json_encode(array("success" => false, "message" => "Illegal request"));
+			$event->return = json_encode(array("success" => false, "message" => $this->_("Unknown client")));
 			$event->replace = true;
 			return $event;
 		}
+		
 		if( $post->arcaction == "initclient" ) {
-			if( $this->initClientAction($client) !== true ) return $event;
+			if( $client->ars_clientsecret ) {
+				header("Content-Type: application/json");
+				$event->return = json_encode(array("success" => false, "message" => $this->_("Client already initialized")));
+			} elseif( $this->initClientAction($event, $client) !== true ) {
+				return $event;
+			}
+			
 		} else if( $post->arcaction == "ping" ) {
 			/* Everything okay, ping time is updated at the end of this method */
 		} else if( $this->moreActions($event, $client) == false ) {
 			header("Content-Type: application/json"); 
-			$event->return = json_encode(array("success" => false, "message" => "Unknown action"));
+			$event->return = json_encode(array("success" => false, "message" => $this->_("Unknown action")));
 			$event->replace = true;
 			return $event;
+			
 		}
 		
 		$client->of(false);
@@ -73,13 +81,15 @@ class AdminRemoteServerListener extends WireData implements Module {
 		$event->replace = true;
 	}
 	
-	public function ___initClientAction(&$origevent, &$client) {
+	public function ___initClientAction($origevent, $client) {
 		$post = $this->input->post;
+		
 		if( ! $post->cli ) {
-			$origevent->return = json_encode(array("success" => false, "message" => "Missing client identifier"));
+			$origevent->return = json_encode(array("success" => false, "message" => $this->_("Missing client identifier")));
 			$origevent->replace = true;
 			return $origevent;
 		}
+		
 		$client->of(false);
 		$client->ars_clientsecret = $post->cli;
 		$client->ars_clienturl = $post->url;
@@ -88,8 +98,24 @@ class AdminRemoteServerListener extends WireData implements Module {
 		return true;
 	}
 	
+	/**
+	 * Add your own custom actions with this hook.
+	 *
+	 * To add your own actions here, hook into AdminRemoteServerListener::moreActions.
+	 *
+	 * To generate your own output, fetch the original event with
+	 * `$origevent = $event->arguments(0);`
+	 * Get the client information with
+	 * `$client = $event->arguments(1);`
+	 *
+	 * Process $input->post however you like, then replace the original event's output
+	 * ```$origevent->return = $your_custom_output;
+	 * $origevent->replace = true;```
+	 *
+	 * Finally, return a true status.
+	 * `return true;`
+	 */
 	public function ___moreActions($origevent, $client) {
-		// Just to be extendable
 		return false;
 	}
 }
